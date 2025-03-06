@@ -98,37 +98,44 @@ pub fn launch_subscribers(
 
 async fn subscriber_task(client: Arc<TopicClient>, cache_name: String, topic: String) {
     PUBSUB_SUBSCRIBE.increment();
-    if let Ok(mut subscription) = client
+    match client
         .subscribe(cache_name.clone(), topic.to_string())
         .await
     {
-        PUBSUB_SUBSCRIBER_CURR.add(1);
-        PUBSUB_SUBSCRIBE_OK.increment();
+        Ok(mut subscription) => {
+            PUBSUB_SUBSCRIBER_CURR.add(1);
+            PUBSUB_SUBSCRIBE_OK.increment();
 
-        let validator = MessageValidator::new();
+            let validator = MessageValidator::new();
 
-        while RUNNING.load(Ordering::Relaxed) {
-            match subscription.next().await {
-                Some(v) => {
-                    if let ValueKind::Binary(mut v) = v.kind {
-                        let _ = validator.validate(&mut v);
-                    } else {
-                        error!("there was a string in the topic");
-                        // unexpected message
-                        PUBSUB_RECEIVE.increment();
-                        PUBSUB_RECEIVE_EX.increment();
+            while RUNNING.load(Ordering::Relaxed) {
+                match subscription.next().await {
+                    Some(v) => {
+                        if let ValueKind::Binary(mut v) = v.kind {
+                            let _ = validator.validate(&mut v);
+                        } else {
+                            error!("there was a string in the topic");
+                            // unexpected message
+                            PUBSUB_RECEIVE.increment();
+                            PUBSUB_RECEIVE_EX.increment();
+                        }
                     }
-                }
-                None => {
-                    PUBSUB_RECEIVE.increment();
-                    PUBSUB_RECEIVE_CLOSED.increment();
-                    PUBSUB_SUBSCRIBER_CURR.sub(1);
-                    break;
+                    None => {
+                        PUBSUB_RECEIVE.increment();
+                        PUBSUB_RECEIVE_CLOSED.increment();
+                        PUBSUB_SUBSCRIBER_CURR.sub(1);
+                        break;
+                    }
                 }
             }
         }
-    } else {
-        PUBSUB_SUBSCRIBE_EX.increment();
+        Err(e) => {
+            PUBSUB_SUBSCRIBE_EX.increment();
+            eprintln!(
+                "Joseph: could not subscribe to topic, the error details {:?}",
+                e
+            );
+        }
     }
 }
 
