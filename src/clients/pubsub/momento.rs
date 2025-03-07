@@ -1,6 +1,7 @@
 use crate::clients::pubsub::*;
 use crate::clients::*;
 use crate::workload::*;
+use ::momento::topics::Subscription;
 use async_channel::Receiver;
 use tokio::runtime::Runtime;
 
@@ -98,43 +99,49 @@ pub fn launch_subscribers(
 
 async fn subscriber_task(client: Arc<TopicClient>, cache_name: String, topic: String) {
     PUBSUB_SUBSCRIBE.increment();
-    match client
-        .subscribe(cache_name.clone(), topic.to_string())
-        .await
-    {
-        Ok(mut subscription) => {
-            PUBSUB_SUBSCRIBER_CURR.add(1);
-            PUBSUB_SUBSCRIBE_OK.increment();
-
-            let validator = MessageValidator::new();
-
-            while RUNNING.load(Ordering::Relaxed) {
-                match subscription.next().await {
-                    Some(v) => {
-                        if let ValueKind::Binary(mut v) = v.kind {
-                            let _ = validator.validate(&mut v);
-                        } else {
-                            error!("there was a string in the topic");
-                            // unexpected message
-                            PUBSUB_RECEIVE.increment();
-                            PUBSUB_RECEIVE_EX.increment();
-                        }
-                    }
-                    None => {
-                        PUBSUB_RECEIVE.increment();
-                        PUBSUB_RECEIVE_CLOSED.increment();
-                        PUBSUB_SUBSCRIBER_CURR.sub(1);
-                        break;
-                    }
+    let mut subscription_wrapper: Option<Subscription> = None;
+    let validator = MessageValidator::new();
+    while RUNNING.load(Ordering::Relaxed) {
+        if subscription_wrapper.is_none() {
+            match client
+                .subscribe(cache_name.clone(), topic.to_string())
+                .await
+            {
+                Ok(subscription) => {
+                    subscription_wrapper = Some(subscription);
+                    PUBSUB_SUBSCRIBER_CURR.add(1);
+                    PUBSUB_SUBSCRIBE_OK.increment();
+                }
+                Err(e) => {
+                    PUBSUB_SUBSCRIBE_EX.increment();
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    eprintln!(
+                        "Joseph: could not subscribe to topic, the error details {:?}",
+                        e
+                    );
+                    continue;
                 }
             }
         }
-        Err(e) => {
-            PUBSUB_SUBSCRIBE_EX.increment();
-            eprintln!(
-                "Joseph: could not subscribe to topic, the error details {:?}",
-                e
-            );
+        if let Some(ref mut subscription) = subscription_wrapper {
+            match subscription.next().await {
+                Some(v) => {
+                    if let ValueKind::Binary(mut v) = v.kind {
+                        let _ = validator.validate(&mut v);
+                    } else {
+                        error!("there was a string in the topic");
+                        // unexpected message
+                        PUBSUB_RECEIVE.increment();
+                        PUBSUB_RECEIVE_EX.increment();
+                    }
+                }
+                None => {
+                    PUBSUB_RECEIVE.increment();
+                    PUBSUB_RECEIVE_CLOSED.increment();
+                    PUBSUB_SUBSCRIBER_CURR.sub(1);
+                    break;
+                }
+            }
         }
     }
 }
